@@ -1,0 +1,187 @@
+# Simple Embedded System Simulator
+# This script creates a simulator file and runs a short demo to show output.
+from pathlib import Path
+import subprocess, sys, textwrap, time, os
+
+project_dir = Path('/mnt/data/embedded_simulator')
+project_dir.mkdir(parents=True, exist_ok=True)
+
+sim_code = r'''#!/usr/bin/env python3
+"""
+embedded_simulator.py - Simple simulator for an embedded real-time system.
+Simulates:
+- A temperature sensor (with noise)
+- A heater actuator (on/off)
+- A controller task running periodically to maintain setpoint (simple hysteresis)
+- A logger task that records values and prints a status table
+- A scheduler using asyncio to mimic RTOS periodic tasks
+Run: python embedded_simulator.py
+"""
+
+import asyncio
+import random
+import time
+from collections import deque
+
+class Sensor:
+    def __init__(self, name='TempSensor', initial=25.0):
+        self.name = name
+        self.true_value = initial  # underlying temp (°C)
+        self.noise = 0.5
+
+    def read(self):
+        # Simulate environment changes slowly + measurement noise
+        noise = random.uniform(-self.noise, self.noise)
+        measured = self.true_value + noise
+        return round(measured, 2)
+
+    def disturb(self, delta):
+        self.true_value += delta
+
+class Actuator:
+    def __init__(self, name='Heater'):
+        self.name = name
+        self.state = False  # off
+
+    def on(self):
+        self.state = True
+
+    def off(self):
+        self.state = False
+
+    def is_on(self):
+        return self.state
+
+class Controller:
+    def __init__(self, sensor, actuator, setpoint=30.0, hysteresis=0.5):
+        self.sensor = sensor
+        self.actuator = actuator
+        self.setpoint = setpoint
+        self.hysteresis = hysteresis
+
+    async def task(self, period_ms=500):
+        # Periodic controller task
+        while True:
+            temp = self.sensor.read()
+            # Decision with hysteresis
+            if temp < self.setpoint - self.hysteresis:
+                self.actuator.on()
+            elif temp > self.setpoint + self.hysteresis:
+                self.actuator.off()
+            # simulate controller computation time
+            await asyncio.sleep(period_ms / 1000.0)
+            # also slowly change the environment depending on actuator
+            if self.actuator.is_on():
+                self.sensor.disturb(+0.15)  # heater increases temperature
+            else:
+                self.sensor.disturb(-0.05)  # environment cools slowly
+
+class Logger:
+    def __init__(self, sensor, actuator, maxlen=200):
+        self.sensor = sensor
+        self.actuator = actuator
+        self.history = deque(maxlen=maxlen)
+
+    async def task(self, period_ms=500):
+        while True:
+            t = time.time()
+            val = self.sensor.read()
+            act = self.actuator.is_on()
+            self.history.append((t, val, act))
+            # print a compact table header occasionally
+            if int(t) % 5 == 0:
+                print(f"{'Time':>8} | {'Temp (C)':>8} | {'Heater':>6}")
+                print("-"*30)
+            print(f"{time.strftime('%H:%M:%S', time.localtime(t))} | {val:8.2f} | {str(act):>6}")
+            await asyncio.sleep(period_ms / 1000.0)
+
+async def user_disturbance(sensor):
+    # Periodically add disturbances (simulate opening a door / cold air)
+    while True:
+        await asyncio.sleep(7)  # every 7 seconds
+        delta = random.uniform(-2.0, -0.5)
+        sensor.disturb(delta)
+        print(f">>> Disturbance applied: {delta:.2f} °C")
+
+async def main(duration=20):
+    sensor = Sensor(initial=25.0)
+    actuator = Actuator()
+    controller = Controller(sensor, actuator, setpoint=28.0, hysteresis=0.4)
+    logger = Logger(sensor, actuator)
+
+    # Start tasks: controller (fast), logger (visual), disturbance (infrequent)
+    ctrl_task = asyncio.create_task(controller.task(period_ms=400))
+    log_task = asyncio.create_task(logger.task(period_ms=1000))
+    dist_task = asyncio.create_task(user_disturbance(sensor))
+
+    # Run for a given duration
+    await asyncio.sleep(duration)
+
+    # Cancel tasks and summarize
+    ctrl_task.cancel()
+    log_task.cancel()
+    dist_task.cancel()
+    await asyncio.sleep(0.1)  # give tasks time to cancel
+
+    # Summary
+    temps = [h[1] for h in logger.history]
+    if temps:
+        print("\\n=== Summary ===")
+        print(f"Samples: {len(temps)}")
+        print(f"Min temp: {min(temps):.2f} C")
+        print(f"Max temp: {max(temps):.2f} C")
+        print(f"Avg temp: {sum(temps)/len(temps):.2f} C")
+
+if __name__ == '__main__':
+    import argparse
+    parser = argparse.ArgumentParser(description='Embedded system simulator demo')
+    parser.add_argument('--duration', type=int, default=20, help='Duration in seconds to run')
+    args = parser.parse_args()
+    try:
+        asyncio.run(main(duration=args.duration))
+    except KeyboardInterrupt:
+        print('Interrupted by user')
+'''
+
+sim_file = project_dir / 'embedded_simulator.py'
+sim_file.write_text(sim_code, encoding='utf-8')
+
+readme = project_dir / 'README.md'
+readme.write_text(textwrap.dedent("""
+Embedded System Simulator (simple educational demo)
+
+Files:
+- embedded_simulator.py : main simulator script
+
+Run demo:
+- python embedded_simulator.py --duration 15
+
+What it simulates:
+- Temperature sensor (simulated)
+- Heater actuator (on/off)
+- Controller task with hysteresis
+- Logger task that prints output to console
+""").strip())
+
+# Run the simulator for a short demo (10 seconds) and capture output
+proc = subprocess.run([sys.executable, str(sim_file), '--duration', '10'], capture_output=True, text=True, cwd=str(project_dir))
+output = proc.stdout + proc.stderr
+
+# Save output to a log file for user to inspect
+logfile = project_dir / 'demo_output.txt'
+logfile.write_text(output, encoding='utf-8')
+
+print("Simulator created at:", sim_file)
+print("Demo output (first 800 chars):\n")
+print(output[:800])
+print("\nYou can download the project as a zip at: sandbox:/mnt/data/embedded_simulator.zip")
+
+# Create zip
+import zipfile
+zip_path = '/mnt/data/embedded_simulator.zip'
+with zipfile.ZipFile(zip_path, 'w') as z:
+    z.write(sim_file, arcname='embedded_simulator.py')
+    z.write(readme, arcname='README.md')
+    z.write(logfile, arcname='demo_output.txt')
+
+zip_path
